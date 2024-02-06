@@ -19,8 +19,8 @@ class ModuleHelpers:
         without_initialisation=False,
         _visited=None,
     ):
-        """
-        Find all internal variables in obj. Return empty Container if obj is None.
+        """Find all internal variables in obj. Return empty Container if obj is
+        None.
 
         Parameters
         ----------
@@ -89,9 +89,10 @@ class ModuleHelpers:
         return vs
 
     def _find_buffers(self):
-        for obj in self.__dict__.keys():
-            if isinstance(getattr(self, obj), ivy.Module):
-                self._buffers.update({obj: getattr(self, obj).buffers})
+        if hasattr(self, "_module_dict"):
+            for key, sub_module in self._module_dict.items():
+                if len(sub_module._buffers) > 0:
+                    self._buffers[key] = sub_module._buffers
 
     def _build_and_return_v(self, *args, **kwargs):
         self.build(*args, **kwargs)
@@ -99,10 +100,10 @@ class ModuleHelpers:
 
     @staticmethod
     def _extract_v(v, keychain_mappings: dict, orig_key_chain, /):
-        """
-        Extract the variables from the variables container v using the key
-        orig_key_chain and reinstantiate the duplicate variables that were removed by
-        _remove_duplicate_variables in their correct locations using keychain_mappings.
+        """Extract the variables from the variables container v using the key
+        orig_key_chain and reinstantiate the duplicate variables that were
+        removed by _remove_duplicate_variables in their correct locations using
+        keychain_mappings.
 
         Parameters
         ----------
@@ -125,15 +126,18 @@ class ModuleHelpers:
             ret_cont = Container()
         for old_kc, new_kc in keychain_mappings.items():
             if orig_key_chain in old_kc:
-                ret_cont = ret_cont.cont_set_at_key_chain(
-                    "/".join(new_kc.split("/")[1:]), v.cont_at_key_chain(new_kc)
-                )
+                # Check if `v` contains `new_kc` before replacing in `ret_cont`
+                if v.cont_has_key_chain(new_kc):
+                    ret_cont = ret_cont.cont_set_at_key_chain(
+                        "/".join(old_kc.split("/")[1:]), v.cont_at_key_chain(new_kc)
+                    )
+                else:
+                    continue
         return ret_cont
 
     @staticmethod
     def _remove_duplicate_variables(vs, created, /):
-        """
-        Remove duplicate variables in `vs` referring to `created`.
+        """Remove duplicate variables in `vs` referring to `created`.
 
         Parameters
         ----------
@@ -177,10 +181,9 @@ class ModuleHelpers:
     def _wrap_call_methods(
         self, keychain_mappings, /, *, key="", obj=None, _visited=None
     ):
-        """
-        Wrap the call methods of the Module object by looping over all the items within
-        the module, wrapping the __call__ methods of all submodules using
-        _fn_with_var_arg.
+        """Wrap the call methods of the Module object by looping over all the
+        items within the module, wrapping the __call__ methods of all
+        submodules using _fn_with_var_arg.
 
         Parameters
         ----------
@@ -237,8 +240,8 @@ class ModuleHelpers:
         return
 
     def _call(self, *args, v=None, buffers=None, **kwargs):
-        """
-        Compute forward pass of the layer, treating layer instance as callable function.
+        """Compute forward pass of the layer, treating layer instance as
+        callable function.
 
         Parameters
         ----------
@@ -259,30 +262,35 @@ class ModuleHelpers:
             Result of the forward pass of the layer.
         """
         if not self._built:
+            first_arr = _get_first_array(*args, **kwargs)
             self.build(
                 *args,
                 **kwargs,
                 from_call=True,
-                dtype=_get_first_array(*args, **kwargs).dtype,
+                dtype=first_arr.dtype if ivy.exists(first_arr) else ivy.default_dtype(),
             )
+
+        # If `v` was provided, replace with the module's v
+        replace_v = False
         if v is not None:
             v_orig = self.v
-            buffers_orig = self.buffers
-            self._v = (
-                Container(v, **v.cont_config)
-                if isinstance(v, Container)
-                else Container(v)
-            )
-            self._buffers = (
-                Container(buffers, **buffers.cont_config)
-                if isinstance(buffers, Container)
-                else Container(buffers)
-            )
-            ret = self._forward(*args, **kwargs)
-            self._v = v_orig
-            self._buffers = buffers_orig
-            return ret
+            self._v = v
+            replace_v = True
 
+        # If `buffers` were provided, replace with the module's buffers
+        replace_buffers = False
+        if buffers is not None:
+            buffers_orig = self.buffers
+            self._buffers = buffers
+            replace_buffers = True
+
+        if replace_v or replace_buffers:
+            # Call the forward pass
+            ret = self._forward(*args, **kwargs)
+            # Replace v, buffers if needed
+            self._v = v_orig if replace_v else self._v
+            self._buffers = buffers_orig if replace_buffers else self._buffers
+            return ret
         elif hasattr(self.__call__, "wrapped"):
             return self.__call__(*args, **kwargs)
         return self._forward(*args, **kwargs)
@@ -301,7 +309,7 @@ class ModuleHelpers:
         self._module_dict = Container()
         for key, value in self.__dict__.items():
             if isinstance(value, ivy.Module):
-                if "stateful" in value.__module__:
+                if "stateful" in value.__module__ or hasattr(value, "_frontend_module"):
                     self._module_dict[key] = value
                 else:
                     self._module_dict[key] = value._module_dict
@@ -327,8 +335,7 @@ class ModuleHelpers:
         return fn(*a, **kw, v=v)
 
     def _fn_with_var_arg(self, fn, v_fn, /, keychain_mappings, orig_key_chain):
-        """
-        Extract variables from `v_fn` and use it as inputs for `fn`.
+        """Extract variables from `v_fn` and use it as inputs for `fn`.
 
         Use `v_fn` to extract the variables and use the extracted
         variables as inputs to the call function fn of the module.
@@ -344,9 +351,9 @@ class ModuleHelpers:
         return _fn_with_var_arg_wrapper
 
     def _convert_tensors_to_numpy(self):
-        """
-        Recursively traverses the module_dict attribute of a Module object and converts
-        every container containing tensors to numpy using the to_numpy() method.
+        """Recursively traverses the module_dict attribute of a Module object
+        and converts every container containing tensors to numpy using the
+        to_numpy() method.
 
         Returns
         -------
@@ -354,14 +361,14 @@ class ModuleHelpers:
             The converted Module object.
         """
         if self.module_dict:
-            for _, module in self.module_dict.items():
+            for module in self.module_dict.values():
                 module._convert_tensors_to_numpy()
         self.v = self.v.to_numpy()
 
     def _convert_numpy_to_tensors(self):
-        """
-        Recursively traverses the module_dict attribute of a Module object and converts
-        every container containing tensors to numpy using the to_numpy() method.
+        """Recursively traverses the module_dict attribute of a Module object
+        and converts every container containing tensors to numpy using the
+        to_numpy() method.
 
         Returns
         -------
@@ -369,7 +376,7 @@ class ModuleHelpers:
             The converted Module object.
         """
         if self.module_dict:
-            for _, module in self.module_dict.items():
+            for module in self.module_dict.values():
                 module._convert_numpy_to_tensors()
                 self.v = self.v.to_ivy()
         else:

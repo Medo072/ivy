@@ -127,8 +127,8 @@ def bias_add(value, bias, data_format=None, name=None):
     if data_format is None:
         data_format = "N...C"
 
-    chanel_index = data_format.find("C")
-    if chanel_index != 1:
+    channel_index = data_format.find("C")
+    if channel_index != 1:
         return ivy.add(value, bias)
     else:
         value = ivy.swapaxes(value, 1, -1)
@@ -314,9 +314,9 @@ def depthwise_conv2d(
     dilations = 1 if dilations is None else dilations
     strides, dilations = _reduce_strides_dilations(2, strides, dilations)
     fc = filter.shape[-2]
-    filter = filter.reshape([
-        *filter.shape[0:2], 1, filter.shape[-2] * filter.shape[-1]
-    ])
+    filter = filter.reshape(
+        [*filter.shape[0:2], 1, filter.shape[-2] * filter.shape[-1]]
+    )
     return ivy.conv_general_dilated(
         input,
         filter,
